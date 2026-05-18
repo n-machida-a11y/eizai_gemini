@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>売上ダッシュボード</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI','Hiragino Sans','Meiryo',sans-serif;background:#f0f2f5;color:#333}
+.header{background:linear-gradient(135deg,#1a237e,#283593);color:#fff;padding:18px 28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.header h1{font-size:18px}
+.header .date{font-size:12px;opacity:.8}
+.hdr-right{display:flex;gap:8px;align-items:center}
+.btn{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:12px}
+.btn:hover{background:rgba(255,255,255,.25)}
+select.sel{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;padding:6px 8px;border-radius:6px;font-size:12px}
+select.sel option{color:#333}
+.container{max-width:1200px;margin:0 auto;padding:16px}
+.loading{text-align:center;padding:60px;color:#666}
+.spinner{display:inline-block;width:36px;height:36px;border:4px solid #e0e0e0;border-top-color:#1a237e;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:18px}
+.kpi{background:#fff;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.kpi .lb{font-size:11px;color:#888}
+.kpi .val{font-size:24px;font-weight:700;color:#1a237e}
+.kpi .sub{font-size:10px;color:#aaa;margin-top:2px}
+.kpi .rt{font-size:12px;font-weight:600;margin-top:2px}
+.good{color:#2e7d32}.warn{color:#e65100}
+.pbar{background:#e0e0e0;border-radius:8px;height:22px;overflow:hidden;position:relative;margin-top:10px}
+.pfill{height:100%;border-radius:8px;transition:width .6s}
+.ptxt{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+.card{background:#fff;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card h3{font-size:13px;color:#555;margin-bottom:8px}
+.tbl{background:#fff;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:18px;overflow-x:auto}
+.tbl h3{font-size:13px;color:#555;margin-bottom:8px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{background:#e8eaf6;padding:6px 8px;text-align:left;font-weight:600;white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid #f0f0f0}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+tr:hover{background:#fafafa}
+.footer{text-align:center;padding:12px;color:#bbb;font-size:11px}
+.nodata{text-align:center;padding:50px;color:#999;font-size:14px}
+</style>
+</head>
+<body>
+<div class="header">
+  <div><h1>西日本衛材株式会社 — 売上ダッシュボード</h1><div class="date" id="rDate">読込中...</div></div>
+  <div class="hdr-right">
+    <select class="sel" id="dateSel" onchange="onDateChange()"><option value="">最新</option></select>
+    <button class="btn" onclick="load()">更新</button>
+  </div>
+</div>
+<div class="container">
+  <div class="loading" id="ld"><div class="spinner"></div><br>データを読み込んでいます...</div>
+  <div id="ct" style="display:none">
+    <div class="kpi-grid" id="kpis"></div>
+    <div class="grid2">
+      <div class="card"><h3>品種別出荷数（換算ケース）</h3><canvas id="cShip"></canvas></div>
+      <div class="card"><h3>品目別在庫残（換算ケース）</h3><canvas id="cInv"></canvas></div>
+      <div class="card"><h3>日別売上推移（蓄積データ）</h3><canvas id="cHist"></canvas></div>
+      <div class="card"><h3>日別出荷推移（蓄積データ）</h3><canvas id="cShipHist"></canvas></div>
+    </div>
+    <div class="tbl"><h3>品目別詳細（換算ケース）</h3>
+      <table id="tDetail"><thead><tr><th>品目</th><th>品名</th><th>在庫</th><th>月/生産</th><th>月/出荷</th><th>年/生産</th><th>年/出荷</th><th>翌日納品</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="tbl"><h3>日別売上履歴</h3>
+      <table id="tHist"><thead><tr><th>日付</th><th>当日売上</th><th>当月売上</th><th>年間売上</th><th>当日目標</th><th>達成率</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+</div>
+<div class="footer">西日本衛材株式会社 売上分析システム</div>
+
+<script>
+const CL={blue:'#4472C4',green:'#70AD47',orange:'#ED7D31',red:'#C00000',purple:'#7B2D8E',teal:'#00B0F0'};
+function fm(v){if(v==null||v==='')return'0';return Number(v).toLocaleString('ja-JP',{maximumFractionDigits:0})}
+function fm1(v){if(v==null||v==='')return'0';return Number(v).toLocaleString('ja-JP',{maximumFractionDigits:1})}
+function pc(a,b){if(!b||!a)return 0;return Math.round(a/b*1000)/10}
+function n(v){return Number(v)||0}
+let charts={};
+
+function load(){
+  document.getElementById('ld').style.display='block';
+  document.getElementById('ct').style.display='none';
+  google.script.run
+    .withSuccessHandler(function(d){
+      console.log('[load] success:', d);
+      if(!d){
+        document.getElementById('ld').innerHTML='<div style="color:#c00">サーバから空応答が返りました（アカウント権限を確認してください）</div>';
+        return;
+      }
+      render(d);
+    })
+    .withFailureHandler(function(e){
+      console.log('[load] failure:', e);
+      document.getElementById('ld').innerHTML='<div style="color:#c00">エラー: '+e.message+'</div>';
+    })
+    .getDashboardData();
+}
+
+function onDateChange(){
+  const v=document.getElementById('dateSel').value;
+  if(!v){load();return}
+  document.getElementById('ld').style.display='block';
+  document.getElementById('ct').style.display='none';
+  google.script.run.withSuccessHandler(render).withFailureHandler(e=>{
+    document.getElementById('ld').innerHTML='<div style="color:#c00">エラー: '+e.message+'</div>';
+  }).getDataForDate(v);
+}
+
+function render(d){
+  document.getElementById('ld').style.display='none';
+  document.getElementById('ct').style.display='block';
+  const c=d.current;
+  if(!c){document.getElementById('ct').innerHTML='<div class="nodata">まだデータがありません。<br>受信フォルダにExcelを置いて取込を実行してください。</div>';return}
+
+  // 日付セレクター
+  if(d.allDates&&d.allDates.length>0){
+    const sel=document.getElementById('dateSel');
+    const cur=c.reportDate||'';
+    sel.innerHTML='<option value="">最新</option>'+d.allDates.map(dt=>`<option value="${dt}" ${dt===cur?'selected':''}>${dt}</option>`).join('');
+  }
+
+  document.getElementById('rDate').textContent='レポート日: '+(c.reportDate||'');
+
+  // KPI
+  const ds=n(c.dailySales),ms=n(c.monthlySales),as=n(c.annualSales);
+  const dt=n(c.dailyTarget),mts=n(c.monthlyTargetSofar),mt=n(c.monthlyTarget),at=n(c.annualTarget),ct2=n(c.cumTarget);
+  document.getElementById('kpis').innerHTML=`
+    <div class="kpi"><div class="lb">当日売上</div><div class="val">¥${fm(ds)}</div><div class="sub">目標: ¥${fm(dt)}</div><div class="rt ${pc(ds,dt)>=100?'good':'warn'}">${pc(ds,dt)}%</div></div>
+    <div class="kpi"><div class="lb">当月累計売上</div><div class="val">¥${fm(ms)}</div><div class="sub">当日まで目標: ¥${fm(mts)}</div><div class="rt ${pc(ms,mts)>=100?'good':'warn'}">${pc(ms,mts)}%</div></div>
+    <div class="kpi"><div class="lb">年間累計売上</div><div class="val">¥${fm(as)}</div><div class="sub">当月末目標: ¥${fm(ct2)}</div><div class="rt ${pc(as,ct2)>=100?'good':'warn'}">${pc(as,ct2)}%</div></div>
+    <div class="kpi"><div class="lb">当月目標進捗</div><div class="pbar" style="margin-top:16px"><div class="pfill" style="width:${Math.min(pc(ms,mt),100)}%;background:${pc(ms,mt)>=25?'#2e7d32':'#e65100'}"></div><div class="ptxt">${pc(ms,mt)}%（月目標: ¥${fm(mt)}）</div></div></div>`;
+
+  // 出荷チャート
+  const ships=c.shipments||[];
+  mkChart('cShip','bar',ships.map(s=>s.name),
+    [{label:'換算ケース',data:ships.map(s=>s.cases),backgroundColor:[CL.blue,CL.green,CL.orange,CL.purple,CL.teal,CL.red,'#A5A5A5',CL.blue+'99',CL.green+'99',CL.orange+'99',CL.purple+'99',CL.teal+'99',CL.red+'99','#FFD700','#8B4513'],borderWidth:1}],
+    {},{indexAxis:'y'});
+
+  // 在庫チャート
+  const det=c.detail||[];
+  const invD=det.filter(d=>d.inventory>0);
+  mkChart('cInv','bar',invD.map(d=>d.key),
+    [{label:'在庫',data:invD.map(d=>d.inventory),backgroundColor:CL.orange+'88',borderColor:CL.orange,borderWidth:1}],
+    {},{indexAxis:'y'});
+
+  // 売上履歴チャート
+  const th=d.targetHistory||[];
+  const byDate={};
+  th.forEach(r=>{const dt2=fmtD(r['取込日']);if(dt2)byDate[dt2]=n(r['当日売上'])});
+  const hDates=Object.keys(byDate).sort().slice(-30);
+  mkChart('cHist','line',hDates,
+    [{label:'当日売上',data:hDates.map(d=>byDate[d]),borderColor:CL.blue,backgroundColor:CL.blue+'33',fill:true,tension:.3}],
+    {y:{ticks:{callback:v=>'¥'+(v/10000).toFixed(0)+'万'}}});
+
+  // 出荷履歴チャート
+  const sh=d.shipmentHistory||[];
+  const byDate2={};
+  sh.forEach(r=>{const dt3=fmtD(r['取込日']);byDate2[dt3]=(byDate2[dt3]||0)+n(r['換算ケース数'])});
+  const hDates2=Object.keys(byDate2).sort().slice(-30);
+  mkChart('cShipHist','bar',hDates2,
+    [{label:'出荷ケース',data:hDates2.map(d=>byDate2[d]),backgroundColor:CL.green+'88',borderColor:CL.green,borderWidth:1}],
+    {y:{ticks:{callback:v=>v.toLocaleString()+'cs'}}});
+
+  // 品目詳細テーブル
+  document.querySelector('#tDetail tbody').innerHTML=det.map(d=>
+    `<tr><td>${d.key}</td><td>${d.name}</td><td class="n">${fm1(d.inventory)}</td><td class="n">${fm1(d.monthProd)}</td><td class="n">${fm1(d.monthShip)}</td><td class="n">${fm1(d.yearProd)}</td><td class="n">${fm1(d.yearShip)}</td><td class="n">${fm1(d.nextDay)}</td></tr>`
+  ).join('');
+
+  // 履歴テーブル
+  const tRows=th.sort((a,b)=>fmtD(b['取込日']).localeCompare(fmtD(a['取込日']))).slice(0,30);
+  document.querySelector('#tHist tbody').innerHTML=tRows.map(r=>{
+    const ds2=n(r['当日売上']),dt4=n(r['当日目標']);
+    return `<tr><td>${fmtD(r['取込日'])}</td><td class="n">¥${fm(ds2)}</td><td class="n">¥${fm(r['当月売上'])}</td><td class="n">¥${fm(r['年間売上'])}</td><td class="n">¥${fm(dt4)}</td><td class="n ${pc(ds2,dt4)>=100?'good':'warn'}">${pc(ds2,dt4)}%</td></tr>`;
+  }).join('');
+}
+
+function fmtD(v){
+  if(!v)return'';
+  if(v instanceof Date)return v.toISOString().split('T')[0];
+  const s=String(v);
+  if(/^\d{4}-\d{2}-\d{2}/.test(s))return s.substring(0,10);
+  try{const d=new Date(v);if(!isNaN(d))return d.toISOString().split('T')[0]}catch(e){}
+  return s;
+}
+
+function mkChart(id,type,labels,datasets,scales,extra){
+  if(charts[id])charts[id].destroy();
+  charts[id]=new Chart(document.getElementById(id),{type,data:{labels,datasets},
+    options:{responsive:true,plugins:{legend:{display:false}},scales:scales||{},...(extra||{})}});
+}
+
+load();
+</script>
+</body>
+</html>
