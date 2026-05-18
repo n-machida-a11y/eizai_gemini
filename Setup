@@ -1,0 +1,97 @@
+/**
+ * 初期セットアップ
+ * - 蓄積シートの作成
+ * - 設定シートの作成（受信フォルダID設定用）
+ * - WEB-reportのL列に計算式がなければ追加
+ */
+
+function setupSystem() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1. 受信フォルダの作成/選択
+  let folderId = '';
+  const configSheet = ss.getSheetByName(CONFIG_SHEET);
+  if (configSheet) {
+    folderId = String(configSheet.getRange('B2').getValue() || '');
+  }
+
+  if (!folderId) {
+    // 受信フォルダを自動作成
+    const folder = DriveApp.createFolder('売上Excel_受信');
+    const archive = folder.createFolder('アーカイブ');
+    folderId = folder.getId();
+    ui.alert(
+      '受信フォルダを作成しました\n\n' +
+      'フォルダ名: 売上Excel_受信\n' +
+      'Google ドライブのマイドライブ直下に作成されています。\n\n' +
+      'このフォルダに3つのExcelファイルを置いてください。'
+    );
+  }
+
+  // 2. 設定シート
+  _createSettingsSheet(ss, folderId);
+
+  // 3. 蓄積シート
+  _createAccSheet(ss, '蓄積_売上',
+    ['取込日', '区分', '取引区分', '当日売上', '当月売上', '売上年計']);
+  _createAccSheet(ss, '蓄積_出荷',
+    ['取込日', '商品群', '換算ケース数']);
+  _createAccSheet(ss, '蓄積_在庫',
+    ['取込日', '品種', '日/入庫', '日/出庫', '日/残',
+     '月計/入庫', '月計/出庫', '月計/残', '累計/入庫', '累計/出庫', '累計/残']);
+  _createAccSheet(ss, '蓄積_目標',
+    ['取込日', '当日売上', '当月売上', '年間売上',
+     '当日目標', '当日まで目標', '当月目標', '年間目標', '当月末まで目標',
+     '在庫合計', '出荷合計']);
+
+  // 4. WEB-reportシートの存在確認
+  const webReport = ss.getSheetByName('WEB-report');
+  if (!webReport) {
+    ui.alert(
+      '⚠ WEB-reportシートが見つかりません\n\n' +
+      '先に「○当日販売実績報告.xlsx」をこのスプレッドシートとして\n' +
+      'Google Sheetsで開いてください（数式が自動で変換されます）。\n\n' +
+      'その後、再度セットアップを実行してください。'
+    );
+    return;
+  }
+
+  ui.alert(
+    'セットアップ完了\n\n' +
+    '■ 受信フォルダ: 売上Excel_受信（マイドライブ直下）\n' +
+    '■ 蓄積シート: 4つ作成済み\n\n' +
+    '【次のステップ】\n' +
+    '1. 受信フォルダに3つのExcelを置く\n' +
+    '2.「売上分析 > Excelを取込」を実行\n' +
+    '3.「売上分析 > 自動取込を開始」で5分おきに自動化'
+  );
+}
+
+function _createSettingsSheet(ss, folderId) {
+  let sheet = ss.getSheetByName(CONFIG_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG_SHEET);
+    sheet.getRange(1, 1, 3, 2).setValues([
+      ['設定項目', '値'],
+      ['受信フォルダID', folderId],
+      ['年度', new Date().getFullYear()],
+    ]);
+    sheet.getRange(1, 1, 1, 2).setBackground('#1a237e').setFontColor('#fff').setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.setColumnWidth(1, 160);
+    sheet.setColumnWidth(2, 360);
+  } else if (folderId) {
+    sheet.getRange('B2').setValue(folderId);
+  }
+}
+
+function _createAccSheet(ss, name, headers) {
+  let sheet = ss.getSheetByName(name);
+  if (sheet) return; // 既に存在
+  sheet = ss.insertSheet(name);
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(1, 1, 1, headers.length)
+    .setBackground('#1a237e').setFontColor('#fff').setFontWeight('bold');
+  sheet.setFrozenRows(1);
+}
