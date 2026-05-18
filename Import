@@ -1,0 +1,347 @@
+/**
+ * Excel取込ロジック
+ *
+ * 受信フォルダ内の.xlsxファイルを検出 → Google Sheets変換 → データ読取
+ * → WEB-reportシートに書込 → 蓄積シートに追記 → アーカイブへ移動
+ */
+
+function importFromDrive() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const config = getConfig_();
+  const folderId = config['受信フォルダID'];
+
+  if (!folderId) {
+    try { SpreadsheetApp.getUi().alert('受信フォルダが設定されていません。\n「売上分析 > 初期セットアップ」を先に実行してください。'); } catch(e) {}
+    return;
+  }
+
+  let folder;
+  try {
+    folder = DriveApp.getFolderById(folderId);
+  } catch (e) {
+    try { SpreadsheetApp.getUi().alert('受信フォルダが見つかりません: ' + folderId); } catch(e2) {}
+    return;
+  }
+
+  // xlsxファイルを検索
+  const files = folder.getFilesByType('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  const xlsxFiles = [];
+  while (files.hasNext()) {
+    xlsxFiles.push(files.next());
+  }
+
+  if (xlsxFiles.length === 0) {
+    // 自動実行時は無言で終了、手動実行時はアラート
+    try { SpreadsheetApp.getUi().alert('受信フォルダにExcelファイルがありません。'); } catch(e) {}
+    return;
+  }
+
+  // 各ファイルを処理
+  const results = [];
+  for (const file of xlsxFiles) {
+    try {
+      const result = _processExcelFile(ss, file);
+      results.push(result);
+    } catch (e) {
+      results.push({ name: file.getName(), type: 'エラー', error: e.message });
+    }
+  }
+
+  // 蓄積シートにスナップショット追記
+  _snapshotToAccumulation(ss);
+
+  // アーカイブへ移動
+  let archiveFolder;
+  try {
+    const subFolders = folder.getFoldersByName('アーカイブ');
+    archiveFolder = subFolders.hasNext() ? subFolders.next() : folder.createFolder('アーカイブ');
+  } catch (e) {
+    archiveFolder = folder.createFolder('アーカイブ');
+  }
+
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd');
+  let dayFolder;
+  try {
+    const dayFolders = archiveFolder.getFoldersByName(today);
+    dayFolder = dayFolders.hasNext() ? dayFolders.next() : archiveFolder.createFolder(today);
+  } catch (e) {
+    dayFolder = archiveFolder.createFolder(today);
+  }
+
+  for (const file of xlsxFiles) {
+    file.moveTo(dayFolder);
+  }
+
+  // 結果表示
+  const summary = results.map(r =>
+    r.error ? `✗ ${r.name}: ${r.error}` : `✓ ${r.name} → ${r.type}`
+  ).join('\n');
+
+  try {
+    SpreadsheetApp.getUi().alert(`取込完了（${results.length}ファイル）\n\n${summary}\n\nファイルはアーカイブ/${today}に移動しました。`);
+  } catch(e) {
+    // 自動実行時はUI不可
+    console.log('Import completed: ' + summary);
+  }
+}
+
+// ============================================================
+//  Excelファイル処理
+// ============================================================
+function _processExcelFile(ss, file) {
+  const fileName = file.getName();
+
+  // xlsx → 一時Google Sheets変換 (Drive API v3)
+  const tempName = '_temp_import_' + Date.now();
+  const blob = file.getBlob();
+  const tempFile = Drive.Files.create(
+    { name: tempName, mimeType: 'application/vnd.google-apps.spreadsheet' },
+    blob,
+    { fields: 'id' }
+  );
+  const tempSs = SpreadsheetApp.openById(tempFile.id);
+  const sheetNames = tempSs.getSheets().map(s => s.getName());
+  const tempSheet = tempSs.getSheets()[0];
+  const data = tempSheet.getDataRange().getValues();
+
+  // デバッグ: 読み取ったデータのサイズとヘッダーをログ出力
+  console.log(`[Import] ファイル: ${fileName}, 行数: ${data.length}, 列数: ${data[0]?.length}`);
+  console.log(`[Import] data[0]: ${JSON.stringify(data[0]?.slice(0, 5))}`);
+  if (data[1]) console.log(`[Import] data[1]: ${JSON.stringify(data[1]?.slice(0, 5))}`);
+  console.log(`[Import] シート名: ${sheetNames}`);
+
+  // ファイル識別
+  const fileType = _identifyFile(data, sheetNames, fileName);
+  console.log(`[Import] 識別結果: ${fileType}`);
+
+  // WEB-reportシートを探す（名前の揺れに対応）
+  const webReport = _findWebReportSheet(ss);
+  if (!webReport) throw new Error('WEB-reportシートが見つかりません。シート名を確認してください。存在するシート: ' + ss.getSheets().map(s => s.getName()).join(', '));
+
+  if (fileType === '売上') {
+    _writeSales(webReport, data);
+  } else if (fileType === '出荷') {
+    _writeShipments(webReport, data);
+  } else if (fileType === '在庫') {
+    _writeInventory(webReport, data);
+  } else {
+    console.log(`[Import] 不明なファイルタイプ。書込スキップ: ${fileName}`);
+  }
+
+  // 一時ファイル削除
+  DriveApp.getFileById(tempFile.id).setTrashed(true);
+
+  return { name: fileName, type: fileType };
+}
+
+// WEB-reportシートを名前の揺れに対応して検索
+function _findWebReportSheet(ss) {
+  // 完全一致
+  let sheet = ss.getSheetByName('WEB-report');
+  if (sheet) return sheet;
+
+  // 大文字小文字・全角半角の揺れに対応
+  const candidates = ['WEB-report', 'WEB-Report', 'web-report', 'WEB_report', 'Webreport'];
+  for (const name of candidates) {
+    sheet = ss.getSheetByName(name);
+    if (sheet) return sheet;
+  }
+
+  // 部分一致で探す
+  for (const s of ss.getSheets()) {
+    const name = s.getName().toLowerCase();
+    if (name.includes('web') && name.includes('report')) return s;
+  }
+
+  return null;
+}
+
+function _identifyFile(data, sheetNames, fileName) {
+  // シート名で判定
+  if (sheetNames.some(n => n === '進捗用' || n === '式')) return '実績報告';
+
+  // 全セルを文字列化して正規化
+  const cellStr = (r, c) => String(data[r]?.[c] ?? '').normalize('NFKC').trim();
+
+  // 最初の5行×5列を全探索してキーワード検索
+  const allText = [];
+  for (let r = 0; r < Math.min(data.length, 5); r++) {
+    for (let c = 0; c < Math.min(data[r]?.length || 0, 12); c++) {
+      allText.push(cellStr(r, c));
+    }
+  }
+  const joined = allText.join('|');
+
+  console.log(`[Identify] ヘッダー先頭: [${cellStr(0,0)}] [${cellStr(0,1)}] [${cellStr(0,2)}]`);
+  console.log(`[Identify] 2行目先頭: [${cellStr(1,0)}] [${cellStr(1,1)}]`);
+  console.log(`[Identify] キーワード検索: ${joined.substring(0, 200)}`);
+
+  // ヘッダー内容で判定
+  if (joined.includes('年月日') && joined.includes('商品群')) return '出荷';
+  if (joined.includes('トイレット') || joined.includes('ﾄｲﾚｯﾄ')) return '在庫';
+  if (joined.includes('当日売上') || joined.includes('KB') || joined.includes('KUBUNN')) return '売上';
+
+  // ファイル名フォールバック
+  const fn = (fileName || '').normalize('NFKC');
+  if (fn.includes('売上') && fn.includes('日月年')) return '売上';
+  if (fn.includes('出荷') || fn.includes('換算')) return '出荷';
+  if (fn.includes('出納') || fn.includes('品種別')) return '在庫';
+  if (fn.includes('販売実績')) return '実績報告';
+
+  return '不明';
+}
+
+// ============================================================
+//  WEB-reportへの書込
+// ============================================================
+
+function _writeSales(webReport, data) {
+  // ファイル1: 売上日月年 → WEB-report B2:F10
+  // data[0] → row2(ヘッダー1), data[1] → row3(ヘッダー2), data[2-8] → row4-10(データ)
+  console.log(`[WriteSales] 行数=${data.length}, 先頭行=${JSON.stringify(data[0]?.slice(0,5))}`);
+
+  const numRows = Math.min(data.length, 9); // 最大9行(row0-8)
+  const values = [];
+  for (let i = 0; i < numRows; i++) {
+    values.push([
+      data[i][0] ?? '', // B列
+      data[i][1] ?? '', // C列
+      data[i][2] ?? '', // D列
+      data[i][3] ?? '', // E列
+      data[i][4] ?? '', // F列
+    ]);
+  }
+  // B2:F(2+numRows-1) に一括書込
+  webReport.getRange(2, 2, numRows, 5).setValues(values);
+  console.log(`[WriteSales] B2:F${2+numRows-1} に ${numRows}行書込完了`);
+}
+
+function _writeShipments(webReport, data) {
+  // ファイル2: 出荷数 → WEB-report H2:J18
+  // data[0] → row2(ヘッダー), data[1-16] → row3-18(データ+合計)
+  console.log(`[WriteShipments] 行数=${data.length}`);
+
+  const numRows = Math.min(data.length, 17); // 最大17行
+  const values = [];
+  for (let i = 0; i < numRows; i++) {
+    values.push([
+      data[i][0] ?? '', // H列: 年月日
+      data[i][1] ?? '', // I列: 商品群名
+      data[i][2] ?? '', // J列: ケース数
+    ]);
+  }
+  // H2:J(2+numRows-1) に一括書込
+  webReport.getRange(2, 8, numRows, 3).setValues(values);
+  console.log(`[WriteShipments] H2:J${2+numRows-1} に ${numRows}行書込完了`);
+}
+
+function _writeInventory(webReport, data) {
+  // ファイル3: 在庫 → WEB-report B23:K38
+  // data[0] → row23, data[1] → row24, data[2-16] → row25-39
+  // L列(col 12)は数式なのでB〜K列(10列)のみ
+  console.log(`[WriteInventory] 行数=${data.length}`);
+
+  const numRows = Math.min(data.length, 16); // 最大16行(ヘッダー2+データ13+小計1 = 16)
+  const values = [];
+  for (let i = 0; i < numRows; i++) {
+    const row = [];
+    for (let c = 0; c < 10; c++) { // B〜K = 10列
+      row.push(data[i][c] ?? '');
+    }
+    values.push(row);
+  }
+  // B23:K(23+numRows-1) に一括書込
+  webReport.getRange(23, 2, numRows, 10).setValues(values);
+  console.log(`[WriteInventory] B23:K${23+numRows-1} に ${numRows}行書込完了`);
+}
+
+// ============================================================
+//  蓄積シートへのスナップショット
+// ============================================================
+function _snapshotToAccumulation(ss) {
+  const formula = ss.getSheetByName('式');
+  const webReport = ss.getSheetByName('WEB-report');
+  if (!formula || !webReport) return;
+
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+
+  // --- 売上蓄積 ---
+  const accSales = ss.getSheetByName('蓄積_売上');
+  if (accSales) {
+    _removeDateRows(accSales, today);
+    // WEB-report B4:F10からデータ取得
+    for (let r = 4; r <= 10; r++) {
+      const cat = webReport.getRange(r, 2).getValue();
+      const tx = webReport.getRange(r, 3).getValue();
+      const daily = webReport.getRange(r, 4).getValue();
+      const monthly = webReport.getRange(r, 5).getValue();
+      const annual = webReport.getRange(r, 6).getValue();
+      if (cat) {
+        accSales.appendRow([today, cat, tx || '', daily || 0, monthly || 0, annual || 0]);
+      }
+    }
+  }
+
+  // --- 出荷蓄積 ---
+  const accShip = ss.getSheetByName('蓄積_出荷');
+  if (accShip) {
+    _removeDateRows(accShip, today);
+    for (let r = 3; r <= 17; r++) {
+      const name = webReport.getRange(r, 9).getValue(); // I列
+      const cases = webReport.getRange(r, 10).getValue(); // J列
+      if (name && !String(name).includes('総計')) {
+        accShip.appendRow([today, _normalize(String(name)), Number(cases) || 0]);
+      }
+    }
+  }
+
+  // --- 在庫蓄積 ---
+  const accInv = ss.getSheetByName('蓄積_在庫');
+  if (accInv) {
+    _removeDateRows(accInv, today);
+    for (let r = 25; r <= 37; r++) {
+      const cat = webReport.getRange(r, 3).getValue(); // C列
+      if (!cat) continue;
+      const vals = [];
+      for (let c = 4; c <= 12; c++) {  // D〜L列
+        vals.push(Number(webReport.getRange(r, c).getValue()) || 0);
+      }
+      accInv.appendRow([today, _normalize(String(cat)), ...vals]);
+    }
+  }
+
+  // --- 目標蓄積 ---
+  const accTarget = ss.getSheetByName('蓄積_目標');
+  if (accTarget) {
+    _removeDateRows(accTarget, today);
+    accTarget.appendRow([
+      today,
+      Number(formula.getRange('C8').getValue()) || 0,  // 当日売上
+      Number(formula.getRange('C9').getValue()) || 0,  // 当月売上
+      Number(formula.getRange('C10').getValue()) || 0, // 年間売上
+      Number(formula.getRange('C13').getValue()) || 0, // 当日目標
+      Number(formula.getRange('C14').getValue()) || 0, // 当日まで目標
+      Number(formula.getRange('C15').getValue()) || 0, // 当月目標
+      Number(formula.getRange('C16').getValue()) || 0, // 年間目標
+      Number(formula.getRange('C17').getValue()) || 0, // 当月末まで目標
+      Number(formula.getRange('E38').getValue()) || 0, // 在庫合計
+      Number(formula.getRange('G38').getValue()) || 0, // 出荷合計
+    ]);
+  }
+}
+
+function _removeDateRows(sheet, date) {
+  if (sheet.getLastRow() <= 1) return;
+  const data = sheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) {
+    const d = data[i][0] instanceof Date
+      ? Utilities.formatDate(data[i][0], 'Asia/Tokyo', 'yyyy-MM-dd')
+      : String(data[i][0]);
+    if (d === date) sheet.deleteRow(i + 1);
+  }
+}
+
+function _normalize(s) {
+  if (!s) return '';
+  return s.normalize('NFKC').replace(/\s+/g, ' ').trim();
+}
